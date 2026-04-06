@@ -10,7 +10,7 @@ BACKUP_DIR="${HOME}/nomad_backup/$(date +%Y-%m-%d)"
 
 ROLE=""
 SERVER_ADDR=""
-TLS_DIR=""
+TLS_DIR="${SCRIPT_DIR}/tls"
 NOMAD_VERSION="1.11.3"
 NOMAD_DIR="${HOME}/nomad/${NOMAD_VERSION}"
 NOMAD_ZIP="${NOMAD_DIR}/nomad_${NOMAD_VERSION}_linux_amd64.zip"
@@ -135,16 +135,6 @@ parse_args() {
 
     if [[ "$ROLE" == "worker" && -z "$SERVER_ADDR" ]]; then
         echo "ERROR: Worker mode requires --server-ip or --server-host"
-        exit 1
-    fi
-
-    if [[ "$ROLE" == "worker" && -z "$TLS_DIR" ]]; then
-        echo "ERROR: Worker mode requires --tls-dir <path>"
-        echo "ERROR: Copy these files from the server's /etc/nomad.d/tls/ to a local directory:"
-        echo "         nomad-agent-ca.pem"
-        echo "         global-client-nomad.pem"
-        echo "         global-client-nomad-key.pem"
-        echo "       Then re-run with: --tls-dir <path-to-that-directory>"
         exit 1
     fi
 
@@ -338,7 +328,8 @@ generate_tls_server_certs() {
     echo "         scp ${tls_dir}/nomad-agent-ca.pem       user@worker:/tmp/nomad-tls/"
     echo "         scp ${tls_dir}/global-client-nomad.pem  user@worker:/tmp/nomad-tls/"
     echo "         scp ${tls_dir}/global-client-nomad-key.pem user@worker:/tmp/nomad-tls/"
-    echo "       Then on the worker:"
+    echo "       Then on the worker (tls/ is the default, so --tls-dir can be omitted):"
+    echo "         ./nomad-setup.sh --worker --server-ip <IP>"
     echo "         ./nomad-setup.sh --worker --server-ip <IP> --tls-dir /tmp/nomad-tls"
 }
 

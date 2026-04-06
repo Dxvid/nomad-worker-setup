@@ -35,9 +35,11 @@ scp /etc/nomad.d/tls/global-client-nomad-key.pem user@worker:/tmp/tls/
 
 **Worker:**
 ```bash
+# --tls-dir defaults to tls/ in the repository root
+./nomad-setup.sh --worker --server-ip <IP>
+./nomad-setup.sh --worker --server-host <hostname>
+# or specify a custom path
 ./nomad-setup.sh --worker --server-ip <IP> --tls-dir /tmp/tls
-# or
-./nomad-setup.sh --worker --server-host <hostname> --tls-dir /tmp/tls
 ```
 
 After setup, activate the Nomad CLI environment:
@@ -169,10 +171,10 @@ nomad-worker-setup/
 
 ## Recommended setup order
 
-1. **Each node:** `./harden-os.sh`
+1. **Each node:** `./harden-os.sh` optionally followed by `--skip-firewalld` or `--skip-mac` or `--skip-fips` or `--skip-auditd`
 2. **Each node:** `./ssh-setup.sh`
 3. **Server:** `./nomad-setup.sh --server`
 4. Copy TLS certificates to each worker (see `tls/README.md`)
-5. **Each worker:** `./nomad-setup.sh --worker --server-ip <IP> --tls-dir tls/`
+5. **Each worker:** `./nomad-setup.sh --worker` followed by `--server-ip <IP>` or `--server-host <hostname>`
 6. **Windows host (WSL2 only):** `.\wsl-firewall-setup.ps1 -Mode worker/server`
 7. **Windows host (WSL2 only):** `.\wsl-autostart-setup.ps1`
