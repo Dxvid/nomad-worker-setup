@@ -412,6 +412,44 @@ create_systemd_service() {
     sudo systemctl enable --now nomad
 }
 
+print_wsl2_hints() {
+    echo ""
+    echo "=== WSL2 network hints ==="
+    echo "Nomad worker is running inside WSL2. For the Nomad server to reach this"
+    echo "worker, you may need to adjust networking on the Windows host."
+    echo ""
+    echo "--- Option A: Mirrored networking (recommended, Windows 11 22H2+) ---"
+    echo "Add to %USERPROFILE%\\.wslconfig on the Windows host:"
+    echo ""
+    echo "  [wsl2]"
+    echo "  networkingMode=mirrored"
+    echo ""
+    echo "This makes WSL2 share the Windows IP — no port forwarding needed."
+    echo "You can also set this in the WSL Settings app under 'Network mode'."
+    echo ""
+    echo "--- Option B: Port forwarding (Windows 10 / older Windows 11) ---"
+    echo "Run the following in PowerShell (as administrator) on the Windows host:"
+    echo ""
+    echo "  \$wsl2ip = (wsl hostname -I).Trim()"
+    echo "  foreach (\$port in @(4646, 4647, 4648)) {"
+    echo "      netsh interface portproxy add v4tov4 \`"
+    echo "          listenport=\$port listenaddress=0.0.0.0 \`"
+    echo "          connectport=\$port connectaddress=\$wsl2ip"
+    echo "  }"
+    echo ""
+    echo "Note: WSL2 IP changes on every restart — re-run the above after each reboot,"
+    echo "or use a startup script to automate it."
+    echo ""
+    echo "--- Windows firewall ---"
+    echo "Allow inbound traffic on ports 4646/4647/4648 TCP in Windows Firewall,"
+    echo "or run in PowerShell (as administrator):"
+    echo ""
+    echo "  New-NetFirewallRule -DisplayName 'Nomad Worker (WSL2)' \`"
+    echo "      -Direction Inbound -Protocol TCP \`"
+    echo "      -LocalPort 4646,4647,4648 -Action Allow"
+    echo ""
+}
+
 print_summary() {
     echo "=== DONE ==="
     echo "Nomad $ROLE is now configured."
@@ -421,6 +459,7 @@ print_summary() {
     echo "WSL2: $IS_WSL2"
     [[ "$ROLE" == "worker" ]] && echo "Server: $SERVER_ADDR"
     [[ -d "$BACKUP_DIR" ]] && echo "Backups: ${BACKUP_DIR}"
+    [[ "$IS_WSL2" == true ]] && print_wsl2_hints
 }
 
 ### ============================================================
