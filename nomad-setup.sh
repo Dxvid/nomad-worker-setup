@@ -95,7 +95,7 @@ systemctl restart docker || true
 ###  INSTALL NOMAD
 ### -----------------------------
 echo "=== Installing Nomad ==="
-NOMAD_VERSION="1.8.2"
+NOMAD_VERSION="1.11.3"
 curl -LO https://releases.hashicorp.com/nomad/${NOMAD_VERSION}/nomad_${NOMAD_VERSION}_linux_amd64.zip
 unzip -o nomad_${NOMAD_VERSION}_linux_amd64.zip
 mv nomad /usr/local/bin/
