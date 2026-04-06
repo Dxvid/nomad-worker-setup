@@ -23,6 +23,7 @@ MAC_FRAMEWORK_APPLIED=""
 SKIP_FIREWALLD=false
 SKIP_AUDIT=false
 SKIP_MAC=false
+SKIP_FIPS=false
 NEEDS_REBOOT=false
 
 ### ============================================================
@@ -34,6 +35,7 @@ parse_args() {
             --skip-firewalld) SKIP_FIREWALLD=true; shift ;;
             --skip-audit)     SKIP_AUDIT=true;     shift ;;
             --skip-mac)       SKIP_MAC=true;        shift ;;
+            --skip-fips)      SKIP_FIPS=true;       shift ;;
             --help)           print_help; exit 0   ;;
             *) echo "Unknown argument: $1"; exit 1 ;;
         esac
@@ -72,10 +74,20 @@ OPTIONS
   --skip-firewalld   Skip firewalld setup
   --skip-audit       Skip auditd setup
   --skip-mac         Skip MAC framework setup entirely
+  --skip-fips        Skip FIPS setup
   --help             Show this help text
 
+FIPS
+  On VM or bare metal the script will ask if you want to install FIPS support
+  using patterns-base-fips. This installs the FIPS-validated crypto modules,
+  adds fips=1 to the kernel boot parameters, regenerates the initramfs, and
+  requires a reboot to take effect.
+
+  FIPS is not possible in WSL2 — the Hyper-V kernel is not FIPS-validated
+  and /proc/sys/crypto/fips_enabled is read-only in the WSL2 namespace.
+
 WHAT THIS SCRIPT DOES NOT DO
-  FIPS mode    — requires kernel-level enforcement, not possible in WSL2
+  FIPS (WSL2)  — requires a FIPS-validated kernel, not possible in WSL2
   Bootloader   — not applicable in WSL2
   Physical     — disk encryption, BIOS password, USB lockdown
 
@@ -91,6 +103,23 @@ backup_file() {
         sudo cp "$dst" "$backup"
         sudo chown "$(id -un)":"$(id -gn)" "$backup"
         echo "[INFO] Backed up ${dst} → ${backup}"
+    fi
+}
+
+install_pattern_or_pkgs() {
+    # Usage: install_pattern_or_pkgs <pattern-name> <fallback-pkg> [<fallback-pkg> ...]
+    # Tries the zypper pattern first (preferred — pulls in all deps and configures
+    # future package installs). Falls back to individual packages if the pattern
+    # is not available in the current repos.
+    local pattern="$1"
+    shift
+    local fallback_pkgs=("$@")
+
+    if sudo zypper -n install -t pattern "$pattern" 2>/dev/null; then
+        echo "[INFO] Installed pattern: ${pattern}"
+    else
+        echo "[INFO] Pattern '${pattern}' not available — installing individual packages"
+        sudo zypper -n install "${fallback_pkgs[@]}"
     fi
 }
 
@@ -623,11 +652,12 @@ _check_selinux_available() {
 
 _mac_install_selinux() {
     echo "=== Installing SELinux ==="
-    sudo zypper -n install \
+    install_pattern_or_pkgs "patterns-base-selinux" \
         selinux-tools \
         selinux-policy \
         selinux-policy-targeted \
         policycoreutils \
+        policycoreutils-python-utils \
         || { echo "ERROR: Failed to install SELinux packages"; exit 1; }
 
     # Write SELinux config — start in permissive so the system boots
@@ -677,7 +707,8 @@ _mac_enforce_selinux() {
 
 _mac_install_and_enforce_apparmor() {
     if ! rpm -q apparmor-utils &>/dev/null; then
-        sudo zypper -n install apparmor-utils apparmor-profiles || true
+        install_pattern_or_pkgs "patterns-base-apparmor" \
+            apparmor apparmor-utils apparmor-profiles apparmor-parser
     fi
     sudo systemctl enable --now apparmor
     _mac_enforce_apparmor
@@ -685,7 +716,8 @@ _mac_install_and_enforce_apparmor() {
 
 _mac_enforce_apparmor() {
     if ! command -v aa-enforce &>/dev/null; then
-        sudo zypper -n install apparmor-utils || true
+        install_pattern_or_pkgs "patterns-base-apparmor" \
+            apparmor apparmor-utils apparmor-profiles apparmor-parser
     fi
 
     local count=0
@@ -696,6 +728,75 @@ _mac_enforce_apparmor() {
 
     echo "[INFO] AppArmor enabled — ${count} profile(s) set to enforce mode"
     echo "[INFO] Run 'sudo aa-status' to see active profiles"
+}
+
+### ============================================================
+###  FIPS
+### ============================================================
+setup_fips() {
+    if [[ "$SKIP_FIPS" == true ]]; then
+        echo "[SKIP] FIPS (--skip-fips)"
+        return
+    fi
+
+    if [[ "$VIRT_TYPE" == "wsl2" ]]; then
+        echo "[INFO] WSL2 detected — skipping FIPS"
+        echo "[INFO] The Hyper-V kernel is not FIPS-validated and"
+        echo "[INFO] /proc/sys/crypto/fips_enabled is read-only in WSL2"
+        return
+    fi
+
+    echo "=== FIPS setup ==="
+
+    # Already enabled?
+    local fips_enabled
+    fips_enabled=$(cat /proc/sys/crypto/fips_enabled 2>/dev/null || echo "0")
+    if [[ "$fips_enabled" == "1" ]]; then
+        echo "[INFO] FIPS is already enabled on this system"
+        return
+    fi
+
+    echo ""
+    echo "FIPS 140 enforces the use of validated cryptographic modules system-wide."
+    echo "It requires a reboot and can affect software that uses non-approved algorithms."
+    echo ""
+    if ! ask_yes_no "Install FIPS support (patterns-base-fips)?"; then
+        echo "[INFO] Skipping FIPS"
+        return
+    fi
+
+    install_pattern_or_pkgs "patterns-base-fips" \
+        dracut-fips \
+        openssl \
+        libgcrypt20-hmac \
+        libssl3-hmac
+
+    # Add fips=1 to kernel boot parameters
+    if [[ -f /etc/default/grub ]]; then
+        if ! grep -q "fips=1" /etc/default/grub; then
+            sudo sed -i \
+                's/GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"/GRUB_CMDLINE_LINUX_DEFAULT="\1 fips=1"/' \
+                /etc/default/grub
+            echo "[INFO] Added fips=1 to GRUB_CMDLINE_LINUX_DEFAULT"
+        else
+            echo "[INFO] fips=1 already present in GRUB config"
+        fi
+
+        sudo grub2-mkconfig -o /boot/grub2/grub.cfg 2>/dev/null || \
+            sudo grub-mkconfig  -o /boot/grub/grub.cfg  2>/dev/null || \
+            echo "[WARN] Could not update GRUB automatically — add fips=1 manually"
+    else
+        echo "[WARN] /etc/default/grub not found — add fips=1 to kernel cmdline manually"
+    fi
+
+    # Regenerate initramfs so dracut-fips hooks are included
+    echo "[INFO] Regenerating initramfs..."
+    sudo dracut --regenerate-all --force 2>/dev/null || \
+        sudo mkinitrd 2>/dev/null || \
+        echo "[WARN] Could not regenerate initramfs — run 'sudo dracut --regenerate-all --force' manually"
+
+    echo "[INFO] FIPS support installed — reboot required to activate"
+    NEEDS_REBOOT=true
 }
 
 ### ============================================================
@@ -864,6 +965,15 @@ print_summary() {
             none)     echo "  ! MAC framework: none (see warnings above)" ;;
         esac
     fi
+    if [[ "$SKIP_FIPS" != true ]]; then
+        local fips_on
+        fips_on=$(cat /proc/sys/crypto/fips_enabled 2>/dev/null || echo "0")
+        if [[ "$fips_on" == "1" ]]; then
+            echo "  + FIPS (already active)"
+        elif [[ "$VIRT_TYPE" == "wsl2" ]]; then
+            echo "  - FIPS skipped (WSL2)"
+        fi
+    fi
 
     if [[ "$IS_WSL2" == true ]]; then
         echo ""
@@ -905,6 +1015,7 @@ main() {
     harden_pam
     setup_audit
     setup_mac_framework
+    setup_fips
     setup_firewalld
     set_login_banner
     harden_cron

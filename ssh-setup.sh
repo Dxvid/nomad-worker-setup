@@ -12,6 +12,13 @@ PUBKEY=""
 PUBKEY_FILE=""
 KEYS_DIR="${SCRIPT_DIR}/keys"
 
+# Populated by detect_ssh_dirs():
+#   SSH_ADMIN_DIR  — where admin config is written (/etc/ssh, always)
+#   SSH_VENDOR_DIR — where vendor defaults live (/usr/etc/ssh on usrmerge,
+#                    same as SSH_ADMIN_DIR on older systems)
+SSH_ADMIN_DIR="/etc/ssh"
+SSH_VENDOR_DIR=""
+
 ### ============================================================
 ###  HELPERS
 ### ============================================================
@@ -93,6 +100,144 @@ EOF
 }
 
 ### ============================================================
+###  DETECT SSH DIRECTORIES
+### ============================================================
+detect_ssh_dirs() {
+    # Modern OpenSUSE (Tumbleweed, Leap 16+) uses usrmerge:
+    #   /usr/etc/ssh/  — vendor defaults shipped by the openssh package (don't edit)
+    #   /etc/ssh/      — admin overrides, takes precedence (always write here)
+    #
+    # Older systems have everything in /etc/ssh/.
+    if [[ -d /usr/etc/ssh ]]; then
+        SSH_VENDOR_DIR="/usr/etc/ssh"
+        echo "[INFO] usrmerge layout detected"
+        echo "[INFO]   Vendor defaults : ${SSH_VENDOR_DIR}  (managed by package, not modified)"
+        echo "[INFO]   Admin config    : ${SSH_ADMIN_DIR}   (written by this script, takes precedence)"
+    else
+        SSH_VENDOR_DIR="/etc/ssh"
+        echo "[INFO] SSH config dir: ${SSH_ADMIN_DIR}"
+    fi
+    sudo mkdir -p "${SSH_ADMIN_DIR}"
+}
+
+### ============================================================
+###  CHECK VENDOR CONFIG FOR SETTINGS TO PRESERVE
+### ============================================================
+check_vendor_sshd_config() {
+    # Only relevant on usrmerge systems where vendor and admin dirs differ
+    [[ "$SSH_VENDOR_DIR" == "$SSH_ADMIN_DIR" ]] && return
+    [[ ! -f "${SSH_VENDOR_DIR}/sshd_config" ]]  && return
+
+    # If an admin config already exists the user has been through this before
+    if [[ -f "${SSH_ADMIN_DIR}/sshd_config" ]]; then
+        echo "[INFO] Admin config already exists — skipping vendor config review"
+        return
+    fi
+
+    echo "=== Reviewing vendor sshd_config for settings to preserve ==="
+    echo "[INFO] Source: ${SSH_VENDOR_DIR}/sshd_config"
+
+    # Settings our new config always sets — safe to skip without warning
+    local -a covered_keys=(
+        HostKey Port AddressFamily ListenAddress
+        SyslogFacility LogLevel
+        LoginGraceTime PermitRootLogin StrictModes MaxAuthTries MaxSessions
+        PubkeyAuthentication AuthorizedKeysFile
+        PasswordAuthentication PermitEmptyPasswords
+        ChallengeResponseAuthentication KbdInteractiveAuthentication
+        UsePAM AllowAgentForwarding AllowTcpForwarding
+        X11Forwarding PrintMotd AcceptEnv
+        KexAlgorithms Ciphers MACs Banner
+    )
+
+    local -a uncovered=()
+    local in_match_block=false
+
+    while IFS= read -r line; do
+        # Skip blank lines and comments
+        [[ -z "${line// }" ]]         && continue
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+
+        local key
+        key=$(echo "$line" | awk '{print $1}')
+
+        # Track Match blocks — they span multiple lines and need special attention
+        if [[ "${key,,}" == "match" ]]; then
+            in_match_block=true
+            uncovered+=("$line")
+            continue
+        fi
+
+        # Lines indented under a Match block belong to it
+        if [[ "$in_match_block" == true ]]; then
+            if [[ "$line" =~ ^[[:space:]] ]]; then
+                uncovered+=("  $line")
+                continue
+            else
+                in_match_block=false
+            fi
+        fi
+
+        # Check if key is handled by our new config
+        local covered=false
+        for s in "${covered_keys[@]}"; do
+            if [[ "${key,,}" == "${s,,}" ]]; then
+                covered=true
+                break
+            fi
+        done
+
+        [[ "$covered" == false ]] && uncovered+=("$line")
+    done < "${SSH_VENDOR_DIR}/sshd_config"
+
+    # Also check for Include directives pointing to drop-in files
+    local includes
+    includes=$(grep -i '^\s*Include' "${SSH_VENDOR_DIR}/sshd_config" 2>/dev/null || true)
+
+    if [[ ${#uncovered[@]} -eq 0 ]] && [[ -z "$includes" ]]; then
+        echo "[INFO] No extra settings in vendor config — nothing to preserve"
+        return
+    fi
+
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│  Settings in ${SSH_VENDOR_DIR}/sshd_config NOT covered by the  │"
+    echo "│  new admin config. Review before proceeding.                    │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    echo ""
+
+    if [[ ${#uncovered[@]} -gt 0 ]]; then
+        for line in "${uncovered[@]}"; do
+            echo "  $line"
+        done
+        echo ""
+    fi
+
+    if [[ -n "$includes" ]]; then
+        echo "  [NOTE] Vendor config has Include directive(s) — check those files too:"
+        echo "$includes" | while read -r inc; do echo "         $inc"; done
+        echo ""
+    fi
+
+    echo "The new config will be written to ${SSH_ADMIN_DIR}/sshd_config."
+    echo "The vendor file is not modified."
+    echo ""
+
+    local answer
+    while true; do
+        read -rp "Proceed? [y/n]: " answer
+        case "${answer,,}" in
+            y|yes) echo ""; break ;;
+            n|no)
+                echo "[INFO] Aborted — no changes made"
+                exit 0
+                ;;
+            *) echo "Please answer y or n" ;;
+        esac
+    done
+}
+
+### ============================================================
 ###  INSTALL SSHD
 ### ============================================================
 install_sshd() {
@@ -110,25 +255,28 @@ install_sshd() {
 generate_host_keys() {
     echo "=== Configuring SSH host keys ==="
 
-    # Remove weak host key types
+    # Remove weak host key types from the admin dir only.
+    # Vendor keys in SSH_VENDOR_DIR are owned by the package manager —
+    # they won't be used because our sshd_config only references the ed25519 key.
     for keytype in rsa dsa ecdsa; do
-        local keyfile="/etc/ssh/ssh_host_${keytype}_key"
+        local keyfile="${SSH_ADMIN_DIR}/ssh_host_${keytype}_key"
         if [[ -f "$keyfile" ]]; then
             sudo rm -f "$keyfile" "${keyfile}.pub"
             echo "[INFO] Removed weak host key: ${keyfile}"
         fi
     done
 
-    # Generate ed25519 host key if missing
-    if [[ ! -f /etc/ssh/ssh_host_ed25519_key ]]; then
-        sudo ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key -N "" -C ""
-        echo "[INFO] Generated new ed25519 host key"
+    # Generate ed25519 host key in the admin dir if missing
+    local ed25519_key="${SSH_ADMIN_DIR}/ssh_host_ed25519_key"
+    if [[ ! -f "$ed25519_key" ]]; then
+        sudo ssh-keygen -t ed25519 -f "$ed25519_key" -N "" -C ""
+        echo "[INFO] Generated new ed25519 host key: ${ed25519_key}"
     else
         echo "[INFO] ed25519 host key already exists, keeping it"
     fi
 
-    sudo chmod 600 /etc/ssh/ssh_host_ed25519_key
-    sudo chmod 644 /etc/ssh/ssh_host_ed25519_key.pub
+    sudo chmod 600 "${ed25519_key}"
+    sudo chmod 644 "${ed25519_key}.pub"
 }
 
 ### ============================================================
@@ -137,19 +285,23 @@ generate_host_keys() {
 write_sshd_config() {
     echo "=== Writing sshd_config ==="
 
-    local config_file="/etc/ssh/sshd_config"
+    local config_file="${SSH_ADMIN_DIR}/sshd_config"
     local backup_file
-    backup_file="/etc/ssh/sshd_config.bak.$(date +%Y%m%d-%H%M%S)"
+    backup_file="${SSH_ADMIN_DIR}/sshd_config.bak.$(date +%Y%m%d-%H%M%S)"
 
     if [[ -f "$config_file" ]]; then
         sudo cp "$config_file" "$backup_file"
         echo "[INFO] Backed up existing config to ${backup_file}"
+    elif [[ -f "${SSH_VENDOR_DIR}/sshd_config" ]]; then
+        echo "[INFO] No existing admin config — vendor default is at ${SSH_VENDOR_DIR}/sshd_config"
+        echo "[INFO] Writing new admin config to ${config_file} (overrides vendor defaults)"
     fi
 
     sudo tee "$config_file" > /dev/null <<EOF
 # Generated by nomad-worker-setup/ssh-setup.sh on $(date)
+# Placed in ${SSH_ADMIN_DIR}/ — takes precedence over ${SSH_VENDOR_DIR}/
 # Only ed25519 host key — RSA/DSA/ECDSA removed
-HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey ${SSH_ADMIN_DIR}/ssh_host_ed25519_key
 
 Port ${SSH_PORT}
 AddressFamily inet
@@ -376,6 +528,8 @@ main() {
     echo "[INFO] Keys dir: ${KEYS_DIR}"
     echo ""
 
+    detect_ssh_dirs
+    check_vendor_sshd_config
     install_sshd
     generate_host_keys
     write_sshd_config

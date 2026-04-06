@@ -233,6 +233,19 @@ remove_conflicting_packages() {
 
 install_dependencies() {
     echo "=== Installing dependencies ==="
+
+    # WSL2 systemd pattern — enables systemd as PID 1 in WSL2, required for
+    # service management (nomad.service, sshd, etc.)
+    if [[ "$IS_WSL2" == true ]]; then
+        if ! sudo zypper -n info -t pattern patterns-wsl-systemd 2>/dev/null | grep -q "^Installed.*Yes"; then
+            echo "[INFO] Installing patterns-wsl-systemd"
+            sudo zypper -n install -t pattern patterns-wsl-systemd || \
+                echo "[WARN] patterns-wsl-systemd not available — ensure systemd is enabled manually in /etc/wsl.conf"
+        else
+            echo "[INFO] patterns-wsl-systemd already installed, skipping"
+        fi
+    fi
+
     local pkgs=()
     for pkg in curl unzip docker nvidia-container-toolkit gettext-tools; do
         if ! rpm -q "$pkg" &>/dev/null; then
