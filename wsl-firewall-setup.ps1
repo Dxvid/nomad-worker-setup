@@ -214,15 +214,65 @@ function Get-NetworkCIDR {
 }
 
 # ============================================================
+#  LIST WSL2 DISTROS
+# ============================================================
+function Get-WslDistros {
+    # wsl --list --quiet outputs distro names, one per line (may include UTF-16 BOM)
+    $raw = wsl --list --quiet 2>$null
+    $distros = $raw |
+        ForEach-Object { $_.Trim() -replace '\x00','' } |
+        Where-Object { $_ -ne '' }
+    return @($distros)
+}
+
+function Select-WslDistro {
+    $distros = Get-WslDistros
+
+    if ($distros.Count -eq 0) {
+        throw "No WSL2 distros found. Install one and re-run this script."
+    }
+
+    if ($distros.Count -eq 1) {
+        Write-Host "[INFO] Using WSL2 distro: $($distros[0])"
+        return $distros[0]
+    }
+
+    Write-Host ""
+    Write-Host "Multiple WSL2 distros detected. Which one runs Nomad?"
+    Write-Host ""
+    for ($i = 0; $i -lt $distros.Count; $i++) {
+        Write-Host "  $($i + 1)) $($distros[$i])"
+    }
+    Write-Host ""
+
+    do {
+        $input = Read-Host "Enter number (1-$($distros.Count))"
+        $choice = $input -as [int]
+    } while (-not $choice -or $choice -lt 1 -or $choice -gt $distros.Count)
+
+    $selected = $distros[$choice - 1]
+    Write-Host "[INFO] Using WSL2 distro: $selected"
+    return $selected
+}
+
+# ============================================================
 #  GET WSL2 VM IP  (only relevant in NAT mode)
 # ============================================================
 function Get-WslIP {
+    param([string]$Distro)
+
     try {
-        $ip = (wsl hostname -I 2>$null).Trim().Split(" ")[0]
+        $raw = if ($Distro) {
+            wsl -d $Distro hostname -I 2>$null
+        } else {
+            wsl hostname -I 2>$null
+        }
+        $ip = $raw.Trim().Split(" ")[0]
         if ($ip -match '^\d+\.\d+\.\d+\.\d+$') { return $ip }
     } catch { }
 
-    throw "Could not get WSL2 IP — is a WSL2 distro running? Start one and re-run this script."
+    $target = if ($Distro) { "distro '$Distro'" } else { "default WSL2 distro" }
+    throw "Could not get IP for $target — is it running? Start it and re-run this script."
 }
 
 # ============================================================
@@ -344,7 +394,8 @@ if ($Legacy) {
     Remove-ExistingNomadRules-Legacy
     Remove-PortForwarding
 
-    $wslIP = Get-WslIP
+    $wslDistro = Select-WslDistro
+    $wslIP     = Get-WslIP -Distro $wslDistro
     Write-Host "[INFO] NAT mode (forced) — WSL2 IP: $wslIP"
     Add-FirewallRule-Legacy -Name "LAN" -RemoteIP $subnet
     Set-PortForwarding -WslIP $wslIP
@@ -360,7 +411,8 @@ if ($Legacy) {
         "mirrored" {
             if (-not (Assert-MirroredSupport)) {
                 # Build too old — fall through to NAT
-                $wslIP = Get-WslIP
+                $wslDistro = Select-WslDistro
+                $wslIP     = Get-WslIP -Distro $wslDistro
                 Write-Host "[INFO] Falling back to NAT mode — WSL2 IP: $wslIP"
                 Add-FirewallRule -Name "LAN"         -RemoteAddress $subnet
                 Add-FirewallRule -Name "WSL2 bridge" -InterfaceAlias "vEthernet (WSL)"
@@ -373,7 +425,8 @@ if ($Legacy) {
         }
 
         "nat" {
-            $wslIP = Get-WslIP
+            $wslDistro = Select-WslDistro
+            $wslIP     = Get-WslIP -Distro $wslDistro
             Write-Host "[INFO] NAT mode — WSL2 IP: $wslIP"
             Add-FirewallRule -Name "LAN"         -RemoteAddress $subnet
             Add-FirewallRule -Name "WSL2 bridge" -InterfaceAlias "vEthernet (WSL)"
@@ -388,7 +441,8 @@ if ($Legacy) {
 
         default {
             Write-Warning "Unknown networking mode '$wslMode' — falling back to NAT-style setup"
-            $wslIP = Get-WslIP
+            $wslDistro = Select-WslDistro
+            $wslIP     = Get-WslIP -Distro $wslDistro
             Write-Host "[INFO] Detected WSL2 IP: $wslIP"
             Add-FirewallRule -Name "LAN (fallback)"         -RemoteAddress $subnet
             Add-FirewallRule -Name "WSL2 bridge (fallback)" -InterfaceAlias "vEthernet (WSL)"
