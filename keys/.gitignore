@@ -1,0 +1,5 @@
+# Allow only .pub files in the keys-folder
+# Block everything else including files without extension so no private keys are added by mistake
+*
+!.gitignore
+!*.pub
