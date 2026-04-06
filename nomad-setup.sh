@@ -45,6 +45,7 @@ backup_file() {
 # Backs up dst if it exists, then copies src → dst with given owner and mode.
 deploy_config() {
     local src="$1" dst="$2" owner="$3" mode="$4"
+    sudo mkdir -p "$(dirname "$dst")"
     backup_file "$dst"
     sudo cp "$src" "$dst"
     sudo chown "$owner" "$dst"
@@ -59,6 +60,7 @@ deploy_template() {
     local src="$1" dst="$2" owner="$3" mode="$4"
     shift 4
     local vars="$*"   # e.g. '${SERVER_ADDR} ${CPU_MODEL}'
+    sudo mkdir -p "$(dirname "$dst")"
     backup_file "$dst"
     envsubst "$vars" < "$src" | sudo tee "$dst" > /dev/null
     sudo chown "$owner" "$dst"
