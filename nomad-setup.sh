@@ -10,6 +10,7 @@ BACKUP_DIR="${HOME}/nomad_backup/$(date +%Y-%m-%d)"
 
 ROLE=""
 SERVER_ADDR=""
+TLS_DIR=""
 NOMAD_VERSION="1.11.3"
 NOMAD_DIR="${HOME}/nomad/${NOMAD_VERSION}"
 NOMAD_ZIP="${NOMAD_DIR}/nomad_${NOMAD_VERSION}_linux_amd64.zip"
@@ -116,6 +117,10 @@ parse_args() {
                 SERVER_ADDR="$2"
                 shift 2
                 ;;
+            --tls-dir)
+                TLS_DIR="$2"
+                shift 2
+                ;;
             *)
                 echo "Unknown argument: $1"
                 exit 1
@@ -130,6 +135,16 @@ parse_args() {
 
     if [[ "$ROLE" == "worker" && -z "$SERVER_ADDR" ]]; then
         echo "ERROR: Worker mode requires --server-ip or --server-host"
+        exit 1
+    fi
+
+    if [[ "$ROLE" == "worker" && -z "$TLS_DIR" ]]; then
+        echo "ERROR: Worker mode requires --tls-dir <path>"
+        echo "ERROR: Copy these files from the server's /etc/nomad.d/tls/ to a local directory:"
+        echo "         nomad-agent-ca.pem"
+        echo "         global-client-nomad.pem"
+        echo "         global-client-nomad-key.pem"
+        echo "       Then re-run with: --tls-dir <path-to-that-directory>"
         exit 1
     fi
 
@@ -262,6 +277,84 @@ install_nomad() {
     sudo chown root:root /usr/local/bin/nomad
     sudo chmod 0755 /usr/local/bin/nomad
     sudo mkdir -p /etc/nomad.d /opt/nomad
+}
+
+generate_tls_server_certs() {
+    echo "=== Generating mTLS certificates ==="
+    local tls_dir="/etc/nomad.d/tls"
+    sudo mkdir -p "$tls_dir"
+
+    if sudo test -f "${tls_dir}/nomad-agent-ca.pem"; then
+        echo "[INFO] CA certificate already exists — skipping cert generation"
+        echo "[INFO] To regenerate, remove ${tls_dir} and re-run this script"
+        return
+    fi
+
+    local tmp
+    tmp=$(mktemp -d)
+    pushd "$tmp" > /dev/null
+
+    echo "[INFO] Creating CA..."
+    nomad tls ca create
+
+    echo "[INFO] Creating server certificate..."
+    nomad tls cert create -server -region global
+
+    echo "[INFO] Creating client certificate (for worker nodes)..."
+    nomad tls cert create -client -region global
+
+    echo "[INFO] Creating CLI certificate..."
+    nomad tls cert create -cli -region global
+
+    popd > /dev/null
+
+    sudo mv "${tmp}"/*.pem "${tls_dir}/"
+    rm -rf "$tmp"
+
+    sudo chown -R root:root "$tls_dir"
+    sudo chmod 700 "$tls_dir"
+    sudo chmod 600 "${tls_dir}"/*-key.pem
+    sudo chmod 644 "${tls_dir}/nomad-agent-ca.pem"
+    sudo chmod 644 "${tls_dir}/global-server-nomad.pem"
+    sudo chmod 644 "${tls_dir}/global-client-nomad.pem"
+    sudo chmod 644 "${tls_dir}/global-cli-nomad.pem"
+
+    echo "[INFO] Certificates stored in ${tls_dir}"
+    echo ""
+    echo "[INFO] Copy the following files to each worker node before running nomad-setup.sh:"
+    echo "         scp ${tls_dir}/nomad-agent-ca.pem       user@worker:/tmp/nomad-tls/"
+    echo "         scp ${tls_dir}/global-client-nomad.pem  user@worker:/tmp/nomad-tls/"
+    echo "         scp ${tls_dir}/global-client-nomad-key.pem user@worker:/tmp/nomad-tls/"
+    echo "       Then on the worker:"
+    echo "         ./nomad-setup.sh --worker --server-ip <IP> --tls-dir /tmp/nomad-tls"
+}
+
+deploy_tls_worker_certs() {
+    echo "=== Deploying mTLS certificates ==="
+    local tls_dir="/etc/nomad.d/tls"
+
+    for f in nomad-agent-ca.pem global-client-nomad.pem global-client-nomad-key.pem; do
+        if [[ ! -f "${TLS_DIR}/${f}" ]]; then
+            echo "ERROR: Missing TLS file: ${TLS_DIR}/${f}"
+            echo "ERROR: Required files in --tls-dir:"
+            echo "         nomad-agent-ca.pem"
+            echo "         global-client-nomad.pem"
+            echo "         global-client-nomad-key.pem"
+            exit 1
+        fi
+    done
+
+    sudo mkdir -p "$tls_dir"
+    sudo cp "${TLS_DIR}/nomad-agent-ca.pem"            "${tls_dir}/"
+    sudo cp "${TLS_DIR}/global-client-nomad.pem"       "${tls_dir}/"
+    sudo cp "${TLS_DIR}/global-client-nomad-key.pem"   "${tls_dir}/"
+
+    sudo chown root:root "${tls_dir}"/*.pem
+    sudo chmod 700 "$tls_dir"
+    sudo chmod 644 "${tls_dir}/nomad-agent-ca.pem" "${tls_dir}/global-client-nomad.pem"
+    sudo chmod 600 "${tls_dir}/global-client-nomad-key.pem"
+
+    echo "[INFO] TLS certificates deployed to ${tls_dir}"
 }
 
 generate_nomad_config() {
@@ -408,6 +501,11 @@ create_systemd_service() {
         /etc/systemd/system/nomad.service \
         root:root 0644
 
+    deploy_config \
+        "${CONFIG_DIR}/nomad-env.sh" \
+        /etc/nomad.d/nomad-env.sh \
+        root:root 0644
+
     sudo systemctl daemon-reload
     sudo systemctl enable --now nomad
 }
@@ -436,6 +534,10 @@ print_summary() {
     echo "WSL2: $IS_WSL2"
     [[ "$ROLE" == "worker" ]] && echo "Server: $SERVER_ADDR"
     [[ -d "$BACKUP_DIR" ]] && echo "Backups: ${BACKUP_DIR}"
+    echo ""
+    echo "mTLS is enabled. To use the Nomad CLI:"
+    echo "  source /etc/nomad.d/nomad-env.sh"
+    echo "  nomad node status"
     [[ "$IS_WSL2" == true ]] && print_wsl2_hints
 }
 
@@ -460,6 +562,13 @@ main() {
     configure_docker
 
     install_nomad
+
+    if [[ "$ROLE" == "server" ]]; then
+        generate_tls_server_certs
+    else
+        deploy_tls_worker_certs
+    fi
+
     generate_nomad_config
     apply_linux_tuning
 
