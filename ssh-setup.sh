@@ -274,7 +274,8 @@ install_authorized_keys() {
 
     if [[ $keys_added -eq 0 ]]; then
         local existing
-        existing=$(sudo wc -l < "$auth_keys")
+        # existing=$(sudo wc -l < "$auth_keys")
+        existing=$(sudo cat "$auth_keys" | wc -l)
         if [[ "$existing" -eq 0 ]]; then
             echo "[WARN] No authorized keys installed — nobody will be able to log in"
             echo "[WARN] Add *.pub files to ${KEYS_DIR} or use --pubkey / --pubkey-file"
@@ -285,7 +286,7 @@ install_authorized_keys() {
 
     sudo chown -R "${SSH_USER}:${SSH_USER}" "$ssh_dir"
     sudo chmod 600 "$auth_keys"
-    echo "[INFO] authorized_keys: $(sudo wc -l < "$auth_keys") key(s) for user ${SSH_USER}"
+    echo "[INFO] authorized_keys: $(sudo cat "$auth_keys" | wc -l) key(s) for user ${SSH_USER}"
 }
 
 ### ============================================================
