@@ -1,0 +1,10 @@
+[Unit]
+Description=Nomad Agent
+After=network.target docker.service
+
+[Service]
+ExecStart=/usr/local/bin/nomad agent -config=/etc/nomad.d
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

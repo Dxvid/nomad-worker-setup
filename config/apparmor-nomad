@@ -1,0 +1,68 @@
+#include <tunables/global>
+
+/usr/local/bin/nomad {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+
+  capability net_admin,
+  capability net_bind_service,
+  capability sys_admin,
+  capability sys_ptrace,
+  capability dac_override,
+  capability dac_read_search,
+  capability setuid,
+  capability setgid,
+  capability kill,
+
+  # Binary
+  /usr/local/bin/nomad mr,
+
+  # Config
+  /etc/nomad.d/ r,
+  /etc/nomad.d/** r,
+
+  # Data dir
+  /opt/nomad/ rw,
+  /opt/nomad/** rw,
+
+  # Temp files and runtime
+  /tmp/** rw,
+  /run/nomad/ rw,
+  /run/nomad/** rw,
+
+  # Logs
+  /var/log/nomad/ rw,
+  /var/log/nomad/** rw,
+
+  # Docker socket (for Docker task driver)
+  /var/run/docker.sock rw,
+
+  # cgroups (required for task isolation)
+  /sys/fs/cgroup/ r,
+  /sys/fs/cgroup/** rw,
+
+  # Proc
+  /proc/*/net/ r,
+  /proc/*/net/** r,
+  /proc/sys/kernel/hostname r,
+  /proc/*/status r,
+
+  # Network
+  network tcp,
+  network udp,
+
+  # Allow spawning child processes (task drivers, plugins)
+  /usr/bin/** Px -> nomad_child,
+  /usr/local/bin/** Px -> nomad_child,
+  /bin/** Px -> nomad_child,
+
+  profile nomad_child {
+    #include <abstractions/base>
+    /usr/bin/** mr,
+    /usr/local/bin/** mr,
+    /bin/** mr,
+    /tmp/** rw,
+    network tcp,
+    network udp,
+  }
+}

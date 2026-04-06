@@ -4,10 +4,14 @@ set -e
 ### ============================================================
 ###  GLOBAL VARIABLES
 ### ============================================================
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_DIR="${SCRIPT_DIR}/config"
+BACKUP_DIR="${HOME}/nomad_backup/$(date +%Y-%m-%d)"
+
 ROLE=""
 SERVER_ADDR=""
 NOMAD_VERSION="1.11.3"
-NOMAD_DIR="/nomad/${NOMAD_VERSION}"
+NOMAD_DIR="${HOME}/nomad/${NOMAD_VERSION}"
 NOMAD_ZIP="${NOMAD_DIR}/nomad_${NOMAD_VERSION}_linux_amd64.zip"
 
 IS_WSL2=false
@@ -19,6 +23,48 @@ HAS_GPU=false
 HAS_SELINUX=false
 HAS_APPARMOR=false
 SELINUX_MODE=""
+
+### ============================================================
+###  HELPERS
+### ============================================================
+
+# backup_file <path>
+# Copies an existing file to BACKUP_DIR, preserving its basename.
+backup_file() {
+    local dst="$1"
+    if [[ -f "$dst" ]]; then
+        mkdir -p "${BACKUP_DIR}"
+        local backup="${BACKUP_DIR}/$(basename "$dst")"
+        echo "[INFO] Backing up ${dst} → ${backup}"
+        sudo cp "$dst" "$backup"
+        sudo chown "$(id -un)":"$(id -gn)" "$backup"
+    fi
+}
+
+# deploy_config <src> <dst> <owner> <mode>
+# Backs up dst if it exists, then copies src → dst with given owner and mode.
+deploy_config() {
+    local src="$1" dst="$2" owner="$3" mode="$4"
+    backup_file "$dst"
+    sudo cp "$src" "$dst"
+    sudo chown "$owner" "$dst"
+    sudo chmod "$mode" "$dst"
+    echo "[INFO] Deployed ${dst} (owner=${owner} mode=${mode})"
+}
+
+# deploy_template <src> <dst> <owner> <mode> <var1> [var2 ...]
+# Like deploy_config but runs envsubst on src before writing, substituting
+# only the listed variables (e.g. '${FOO} ${BAR}').
+deploy_template() {
+    local src="$1" dst="$2" owner="$3" mode="$4"
+    shift 4
+    local vars="$*"   # e.g. '${SERVER_ADDR} ${CPU_MODEL}'
+    backup_file "$dst"
+    envsubst "$vars" < "$src" | sudo tee "$dst" > /dev/null
+    sudo chown "$owner" "$dst"
+    sudo chmod "$mode" "$dst"
+    echo "[INFO] Deployed ${dst} from template (owner=${owner} mode=${mode})"
+}
 
 ### ============================================================
 ###  FUNCTIONS
@@ -40,13 +86,13 @@ detect_os() {
 
     echo "[INFO] NAME=${name} ID=${id} VERSION_ID=${version_id:-n/a}"
 
-    if [[ "${id_like,,}" != *"opensuse"* ]]; then
-        echo "ERROR: ID_LIKE does not contain 'opensuse' — zypper not available"
-        echo "ERROR: This script requires an openSUSE-based distribution"
+    if [[ "${id_like,,}" != *"suse"* ]]; then
+        echo "ERROR: ID_LIKE does not contain 'suse' — zypper not available"
+        echo "ERROR: This script requires an (Open)SUSE-based distribution"
         exit 1
     fi
 
-    echo "[INFO] openSUSE detected in ID_LIKE — zypper available"
+    echo "[INFO] SUSE detected in ID_LIKE — zypper available"
 }
 
 parse_args() {
@@ -159,7 +205,7 @@ remove_conflicting_packages() {
 install_dependencies() {
     echo "=== Installing dependencies ==="
     local pkgs=()
-    for pkg in curl unzip docker nvidia-container-toolkit; do
+    for pkg in curl unzip docker nvidia-container-toolkit gettext-tools; do
         if ! rpm -q "$pkg" &>/dev/null; then
             pkgs+=("$pkg")
         else
@@ -180,7 +226,7 @@ configure_docker() {
 
 install_nomad() {
     echo "=== Installing Nomad ==="
-    sudo mkdir -p "${NOMAD_DIR}"
+    mkdir -p "${NOMAD_DIR}"
 
     if [[ -f "${NOMAD_ZIP}" ]]; then
         echo "[INFO] ${NOMAD_ZIP} already exists, skipping download"
@@ -189,66 +235,43 @@ install_nomad() {
             "https://releases.hashicorp.com/nomad/${NOMAD_VERSION}/nomad_${NOMAD_VERSION}_linux_amd64.zip"
     fi
 
-    sudo unzip -o "${NOMAD_ZIP}" -d "${NOMAD_DIR}"
+    unzip -o "${NOMAD_ZIP}" -d "${NOMAD_DIR}"
 
     if [[ -f /usr/local/bin/nomad ]]; then
-        local backup_date backup_dir
-        backup_date=$(date +%Y-%m-%d)
-        backup_dir="${HOME}/nomad_backup/${backup_date}"
-        mkdir -p "${backup_dir}"
-        echo "[INFO] /usr/local/bin/nomad already exists, archiving to ${backup_dir}/nomad"
-        mv /usr/local/bin/nomad "${backup_dir}/nomad"
+        mkdir -p "${BACKUP_DIR}"
+        echo "[INFO] /usr/local/bin/nomad already exists, archiving to ${BACKUP_DIR}/nomad"
+        sudo cp /usr/local/bin/nomad "${BACKUP_DIR}/nomad"
+        sudo chown "$(id -un)":"$(id -gn)" "${BACKUP_DIR}/nomad"
     fi
 
     sudo mv "${NOMAD_DIR}/nomad" /usr/local/bin/
-    sudo chmod +x /usr/local/bin/nomad
+    sudo chown root:root /usr/local/bin/nomad
+    sudo chmod 0755 /usr/local/bin/nomad
     sudo mkdir -p /etc/nomad.d /opt/nomad
 }
 
 generate_nomad_config() {
     echo "=== Generating Nomad config ==="
+    sudo mkdir -p /etc/nomad.d
 
     if [[ "$ROLE" == "server" ]]; then
-        sudo tee /etc/nomad.d/server.hcl <<EOF > /dev/null
-server {
-  enabled = true
-  bootstrap_expect = 1
-}
-
-data_dir = "/opt/nomad"
-
-advertise {
-  http = "0.0.0.0:4646"
-  rpc  = "0.0.0.0:4647"
-  serf = "0.0.0.0:4648"
-}
-EOF
+        deploy_config \
+            "${CONFIG_DIR}/nomad-server.hcl" \
+            /etc/nomad.d/server.hcl \
+            root:root 0640
     else
-        sudo tee /etc/nomad.d/client.hcl <<EOF > /dev/null
-client {
-  enabled = true
-  servers = ["$SERVER_ADDR:4647"]
-
-  meta {
-    cpu_model = "$CPU_MODEL"
-    cpu_cores = "$CPU_CORES"
-    ram_gb    = "$RAM_GB"
-    gpu_model = "$GPU_MODEL"
-    wsl2      = "$IS_WSL2"
-  }
-}
-
-data_dir = "/opt/nomad"
-EOF
+        export SERVER_ADDR CPU_MODEL CPU_CORES RAM_GB GPU_MODEL IS_WSL2
+        deploy_template \
+            "${CONFIG_DIR}/nomad-client.hcl.tpl" \
+            /etc/nomad.d/client.hcl \
+            root:root 0640 \
+            '${SERVER_ADDR} ${CPU_MODEL} ${CPU_CORES} ${RAM_GB} ${GPU_MODEL} ${IS_WSL2}'
 
         if [[ "$HAS_GPU" == true ]]; then
-            sudo tee /etc/nomad.d/gpu.hcl <<EOF > /dev/null
-plugin "nvidia" {
-  config {
-    enabled = true
-  }
-}
-EOF
+            deploy_config \
+                "${CONFIG_DIR}/nomad-gpu.hcl" \
+                /etc/nomad.d/gpu.hcl \
+                root:root 0640
         fi
     fi
 }
@@ -256,17 +279,15 @@ EOF
 apply_linux_tuning() {
     echo "=== Applying Linux tuning ==="
 
-    sudo tee /etc/security/limits.d/99-nomad.conf <<EOF > /dev/null
-* soft nofile 1048576
-* hard nofile 1048576
-EOF
+    deploy_config \
+        "${CONFIG_DIR}/limits-99-nomad.conf" \
+        /etc/security/limits.d/99-nomad.conf \
+        root:root 0644
 
-    sudo tee /etc/sysctl.d/99-nomad.conf <<EOF > /dev/null
-vm.swappiness=10
-net.core.somaxconn=4096
-net.ipv4.tcp_fin_timeout=15
-net.ipv4.tcp_tw_reuse=1
-EOF
+    deploy_config \
+        "${CONFIG_DIR}/sysctl-99-nomad.conf" \
+        /etc/sysctl.d/99-nomad.conf \
+        root:root 0644
 
     sudo sysctl --system || true
 }
@@ -304,30 +325,10 @@ configure_selinux() {
         sudo semanage port -a -t http_port_t -p udp "$port" 2>/dev/null || true
     done
 
-    # Compile and load a minimal policy module
+    # Compile and load policy module from config/nomad.te
     local tmp
     tmp=$(mktemp -d)
-    sudo tee "${tmp}/nomad.te" <<'SEEOF' > /dev/null
-module nomad 1.0;
-
-require {
-    type unconfined_service_t;
-    type bin_t;
-    type etc_t;
-    type var_t;
-    type docker_var_run_t;
-    class file { read write execute execute_no_trans open getattr };
-    class dir { read write search open getattr add_name remove_name };
-    class sock_file { write };
-}
-
-allow unconfined_service_t bin_t:file { execute execute_no_trans open getattr };
-allow unconfined_service_t etc_t:file { read open getattr };
-allow unconfined_service_t etc_t:dir { read search open };
-allow unconfined_service_t var_t:dir { read write search open getattr add_name remove_name };
-allow unconfined_service_t var_t:file { read write open getattr };
-allow unconfined_service_t docker_var_run_t:sock_file { write };
-SEEOF
+    cp "${CONFIG_DIR}/nomad.te" "${tmp}/nomad.te"
 
     if command -v checkmodule &>/dev/null && command -v semodule_package &>/dev/null; then
         checkmodule -M -m -o "${tmp}/nomad.mod" "${tmp}/nomad.te" && \
@@ -346,79 +347,13 @@ SEEOF
 configure_apparmor() {
     echo "=== Configuring AppArmor for Nomad ==="
 
-    sudo tee /etc/apparmor.d/usr.local.bin.nomad <<'AAEOF' > /dev/null
-#include <tunables/global>
-
-/usr/local/bin/nomad {
-  #include <abstractions/base>
-  #include <abstractions/nameservice>
-
-  capability net_admin,
-  capability net_bind_service,
-  capability sys_admin,
-  capability sys_ptrace,
-  capability dac_override,
-  capability dac_read_search,
-  capability setuid,
-  capability setgid,
-  capability kill,
-
-  # Binary
-  /usr/local/bin/nomad mr,
-
-  # Config
-  /etc/nomad.d/ r,
-  /etc/nomad.d/** r,
-
-  # Data dir
-  /opt/nomad/ rw,
-  /opt/nomad/** rw,
-
-  # Temp files and runtime
-  /tmp/** rw,
-  /run/nomad/ rw,
-  /run/nomad/** rw,
-
-  # Logs
-  /var/log/nomad/ rw,
-  /var/log/nomad/** rw,
-
-  # Docker socket (for Docker task driver)
-  /var/run/docker.sock rw,
-
-  # cgroups (required for task isolation)
-  /sys/fs/cgroup/ r,
-  /sys/fs/cgroup/** rw,
-
-  # Proc
-  /proc/*/net/ r,
-  /proc/*/net/** r,
-  /proc/sys/kernel/hostname r,
-  /proc/*/status r,
-
-  # Network
-  network tcp,
-  network udp,
-
-  # Allow spawning child processes (task drivers, plugins)
-  /usr/bin/** Px -> nomad_child,
-  /usr/local/bin/** Px -> nomad_child,
-  /bin/** Px -> nomad_child,
-
-  profile nomad_child {
-    #include <abstractions/base>
-    /usr/bin/** mr,
-    /usr/local/bin/** mr,
-    /bin/** mr,
-    /tmp/** rw,
-    network tcp,
-    network udp,
-  }
-}
-AAEOF
+    deploy_config \
+        "${CONFIG_DIR}/apparmor-nomad" \
+        /etc/apparmor.d/usr.local.bin.nomad \
+        root:root 0644
 
     sudo apparmor_parser -r /etc/apparmor.d/usr.local.bin.nomad && \
-        echo "[INFO] AppArmor profile for Nomad loaded" || \
+        echo "[INFO] AppArmor profile loaded" || \
         echo "[WARN] Could not load AppArmor profile"
 }
 
@@ -452,18 +387,10 @@ configure_firewall() {
 create_systemd_service() {
     echo "=== Creating systemd service ==="
 
-    sudo tee /etc/systemd/system/nomad.service <<EOF > /dev/null
-[Unit]
-Description=Nomad Agent
-After=network.target docker.service
-
-[Service]
-ExecStart=/usr/local/bin/nomad agent -config=/etc/nomad.d
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-EOF
+    deploy_config \
+        "${CONFIG_DIR}/nomad.service" \
+        /etc/systemd/system/nomad.service \
+        root:root 0644
 
     sudo systemctl daemon-reload
     sudo systemctl enable --now nomad
@@ -477,6 +404,7 @@ print_summary() {
     echo "GPU:  $GPU_MODEL"
     echo "WSL2: $IS_WSL2"
     [[ "$ROLE" == "worker" ]] && echo "Server: $SERVER_ADDR"
+    [[ -d "$BACKUP_DIR" ]] && echo "Backups: ${BACKUP_DIR}"
 }
 
 ### ============================================================
@@ -485,6 +413,13 @@ print_summary() {
 main() {
     detect_os
     parse_args "$@"
+
+    if [[ ! -d "$CONFIG_DIR" ]]; then
+        echo "ERROR: Config directory not found: ${CONFIG_DIR}"
+        echo "ERROR: Make sure you run this script from the repository root"
+        exit 1
+    fi
+
     detect_environment
 
     remove_conflicting_packages
@@ -500,7 +435,7 @@ main() {
     elif [[ "$HAS_APPARMOR" == true ]]; then
         configure_apparmor
     else
-        echo "[INFO] No MAC framework (SELinux/AppArmor) detected — skipping security policy configuration"
+        echo "[INFO] No MAC framework (SELinux/AppArmor) detected — skipping security policy"
     fi
 
     configure_firewall

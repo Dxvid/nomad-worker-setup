@@ -141,10 +141,10 @@ sudo systemctl restart docker || true
 ### -----------------------------
 echo "=== Installing Nomad ==="
 NOMAD_VERSION="1.11.3"
-NOMAD_DIR="/nomad/${NOMAD_VERSION}"
+NOMAD_DIR="${HOME}/nomad/${NOMAD_VERSION}"
 NOMAD_ZIP="${NOMAD_DIR}/nomad_${NOMAD_VERSION}_linux_amd64.zip"
 
-sudo mkdir -p "${NOMAD_DIR}"
+mkdir -p "${NOMAD_DIR}"
 
 if [[ -f "${NOMAD_ZIP}" ]]; then
     echo "[INFO] ${NOMAD_ZIP} already exists, skipping download"
@@ -153,7 +153,7 @@ else
         "https://releases.hashicorp.com/nomad/${NOMAD_VERSION}/nomad_${NOMAD_VERSION}_linux_amd64.zip"
 fi
 
-sudo unzip -o "${NOMAD_ZIP}" -d "${NOMAD_DIR}"
+unzip -o "${NOMAD_ZIP}" -d "${NOMAD_DIR}"
 
 if [[ -f /usr/local/bin/nomad ]]; then
     BACKUP_DATE=$(date +%Y-%m-%d)

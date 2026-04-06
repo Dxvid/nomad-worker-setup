@@ -1,0 +1,19 @@
+module nomad 1.0;
+
+require {
+    type unconfined_service_t;
+    type bin_t;
+    type etc_t;
+    type var_t;
+    type docker_var_run_t;
+    class file { read write execute execute_no_trans open getattr };
+    class dir { read write search open getattr add_name remove_name };
+    class sock_file { write };
+}
+
+allow unconfined_service_t bin_t:file { execute execute_no_trans open getattr };
+allow unconfined_service_t etc_t:file { read open getattr };
+allow unconfined_service_t etc_t:dir { read search open };
+allow unconfined_service_t var_t:dir { read write search open getattr add_name remove_name };
+allow unconfined_service_t var_t:file { read write open getattr };
+allow unconfined_service_t docker_var_run_t:sock_file { write };
