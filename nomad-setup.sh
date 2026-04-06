@@ -192,6 +192,18 @@ detect_environment() {
     fi
 }
 
+add_nvidia_repo() {
+    echo "=== Adding NVIDIA container toolkit repository ==="
+    if sudo zypper lr --uri 2>/dev/null | grep -q 'nvidia.github.io/libnvidia-container'; then
+        echo "[INFO] NVIDIA container toolkit repo already present, skipping"
+    else
+        sudo zypper -n ar \
+            https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo
+        echo "[INFO] NVIDIA container toolkit repo added"
+    fi
+    sudo zypper --gpg-auto-import-keys refresh
+}
+
 remove_conflicting_packages() {
     echo "=== Removing conflicting Docker packages ==="
     for pkg in docker-rootless-extras docker-stable-rootless-extras; do
@@ -424,6 +436,7 @@ main() {
 
     detect_environment
 
+    add_nvidia_repo
     remove_conflicting_packages
     install_dependencies
     configure_docker
