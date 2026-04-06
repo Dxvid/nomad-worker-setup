@@ -2,4 +2,5 @@
 # Block everything else including files without extension so no private keys are added by mistake
 *
 !.gitignore
+!README.md
 !*.pub

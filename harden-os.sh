@@ -132,6 +132,31 @@ sysctl_set() {
     fi
 }
 
+# resolve_conf <etc-path> [usr-etc-path]
+# On usrmerge systems a config may only exist in /usr/etc/ until an admin
+# override is created in /etc/. This function returns the path that exists,
+# copying the vendor file to /etc/ first if needed so callers can edit it.
+resolve_conf() {
+    local etc_path="$1"
+    local vendor_path="${2:-/usr${etc_path}}"   # e.g. /etc/foo → /usr/etc/foo
+
+    if [[ -f "$etc_path" ]]; then
+        echo "$etc_path"
+        return
+    fi
+
+    if [[ -f "$vendor_path" ]]; then
+        sudo mkdir -p "$(dirname "$etc_path")"
+        sudo cp "$vendor_path" "$etc_path"
+        echo "[INFO] Copied vendor ${vendor_path} → ${etc_path} (usrmerge override)" >&2
+        echo "$etc_path"
+        return
+    fi
+
+    # Neither exists — return the /etc/ path and let the caller handle it
+    echo "$etc_path"
+}
+
 ask_yes_no() {
     # ask_yes_no "Question?" → returns 0 for yes, 1 for no
     local prompt="$1"
@@ -415,23 +440,33 @@ even_deny_root
 EOF
     echo "[INFO] faillock: 5 attempts → 10 min lockout"
 
-    backup_file /etc/login.defs
-    sudo sed -i \
-        -e 's/^PASS_MAX_DAYS.*/PASS_MAX_DAYS   90/' \
-        -e 's/^PASS_MIN_DAYS.*/PASS_MIN_DAYS   1/'  \
-        -e 's/^PASS_WARN_AGE.*/PASS_WARN_AGE   14/' \
-        /etc/login.defs
-    echo "[INFO] Password aging: max 90 days, warn 14 days before"
+    local login_defs
+    login_defs=$(resolve_conf /etc/login.defs)
+    if [[ -f "$login_defs" ]]; then
+        backup_file "$login_defs"
+        sudo sed -i \
+            -e 's/^PASS_MAX_DAYS.*/PASS_MAX_DAYS   90/' \
+            -e 's/^PASS_MIN_DAYS.*/PASS_MIN_DAYS   1/'  \
+            -e 's/^PASS_WARN_AGE.*/PASS_WARN_AGE   14/' \
+            "$login_defs"
+        echo "[INFO] Password aging: max 90 days, warn 14 days before"
+    else
+        echo "[WARN] login.defs not found in /etc/ or /usr/etc/ — skipping password aging"
+    fi
 
-    if [[ -f /etc/security/pwquality.conf ]]; then
-        backup_file /etc/security/pwquality.conf
-        sudo tee /etc/security/pwquality.conf > /dev/null <<'EOF'
+    local pwquality_conf
+    pwquality_conf=$(resolve_conf /etc/security/pwquality.conf)
+    if [[ -f "$pwquality_conf" ]]; then
+        backup_file "$pwquality_conf"
+        sudo tee "$pwquality_conf" > /dev/null <<'EOF'
 minlen = 12
 minclass = 3
 usercheck = 1
 difok = 5
 EOF
         echo "[INFO] pwquality: min 12 chars, 3 character classes"
+    else
+        echo "[WARN] pwquality.conf not found — skipping password complexity"
     fi
 }
 

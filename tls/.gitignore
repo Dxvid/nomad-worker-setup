@@ -1,0 +1,5 @@
+# Block everything — no certificates or keys may be committed
+*
+!.gitignore
+!README.md
+!README-swedish.md

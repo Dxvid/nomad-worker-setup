@@ -188,11 +188,11 @@ check_vendor_sshd_config() {
         done
 
         [[ "$covered" == false ]] && uncovered+=("$line")
-    done < "${SSH_VENDOR_DIR}/sshd_config"
+    done < <(sudo cat "${SSH_VENDOR_DIR}/sshd_config")
 
     # Also check for Include directives pointing to drop-in files
     local includes
-    includes=$(grep -i '^\s*Include' "${SSH_VENDOR_DIR}/sshd_config" 2>/dev/null || true)
+    includes=$(sudo grep -i '^\s*Include' "${SSH_VENDOR_DIR}/sshd_config" 2>/dev/null || true)
 
     if [[ ${#uncovered[@]} -eq 0 ]] && [[ -z "$includes" ]]; then
         echo "[INFO] No extra settings in vendor config — nothing to preserve"
