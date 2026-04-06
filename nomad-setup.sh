@@ -80,27 +80,67 @@ else
 fi
 
 ### -----------------------------
+###  REMOVE CONFLICTING PACKAGES
+### -----------------------------
+echo "=== Removing conflicting Docker packages ==="
+for pkg in docker-rootless-extras docker-stable-rootless-extras; do
+    if rpm -q "$pkg" &>/dev/null; then
+        echo "[INFO] Removing $pkg"
+        sudo zypper -n remove "$pkg" || true
+    fi
+done
+
+### -----------------------------
 ###  INSTALL DEPENDENCIES
 ### -----------------------------
 echo "=== Installing dependencies ==="
-zypper -n install curl unzip docker nvidia-container-toolkit || true
+PKGS_TO_INSTALL=()
+for pkg in curl unzip docker nvidia-container-toolkit; do
+    if ! rpm -q "$pkg" &>/dev/null; then
+        PKGS_TO_INSTALL+=("$pkg")
+    else
+        echo "[INFO] $pkg already installed, skipping"
+    fi
+done
+if [[ ${#PKGS_TO_INSTALL[@]} -gt 0 ]]; then
+    sudo zypper -n install "${PKGS_TO_INSTALL[@]}" || true
+fi
 
-systemctl enable --now docker || true
+sudo systemctl enable --now docker || true
 
 echo "=== Configuring Docker ==="
-nvidia-ctk runtime configure --runtime=docker || true
-systemctl restart docker || true
+sudo nvidia-ctk runtime configure --runtime=docker || true
+sudo systemctl restart docker || true
 
 ### -----------------------------
 ###  INSTALL NOMAD
 ### -----------------------------
 echo "=== Installing Nomad ==="
 NOMAD_VERSION="1.11.3"
-curl -LO https://releases.hashicorp.com/nomad/${NOMAD_VERSION}/nomad_${NOMAD_VERSION}_linux_amd64.zip
-unzip -o nomad_${NOMAD_VERSION}_linux_amd64.zip
-mv nomad /usr/local/bin/
-chmod +x /usr/local/bin/nomad
-mkdir -p /etc/nomad.d /opt/nomad
+NOMAD_DIR="/nomad/${NOMAD_VERSION}"
+NOMAD_ZIP="${NOMAD_DIR}/nomad_${NOMAD_VERSION}_linux_amd64.zip"
+
+sudo mkdir -p "${NOMAD_DIR}"
+
+if [[ -f "${NOMAD_ZIP}" ]]; then
+    echo "[INFO] ${NOMAD_ZIP} already exists, skipping download"
+else
+    sudo curl -L -o "${NOMAD_ZIP}" \
+        "https://releases.hashicorp.com/nomad/${NOMAD_VERSION}/nomad_${NOMAD_VERSION}_linux_amd64.zip"
+fi
+
+sudo unzip -o "${NOMAD_ZIP}" -d "${NOMAD_DIR}"
+
+if [[ -f /usr/local/bin/nomad ]]; then
+    BACKUP_DATE=$(date +%Y-%m-%d)
+    BACKUP_PATH="${HOME}/nomad_backup/${BACKUP_DATE}"
+    echo "[INFO] /usr/local/bin/nomad already exists, archiving to ${BACKUP_PATH}"
+    mv /usr/local/bin/nomad "${BACKUP_PATH}"
+fi
+
+sudo mv "${NOMAD_DIR}/nomad" /usr/local/bin/
+sudo chmod +x /usr/local/bin/nomad
+sudo mkdir -p /etc/nomad.d /opt/nomad
 
 ### -----------------------------
 ###  GENERATE NOMAD CONFIG
@@ -109,7 +149,7 @@ echo "=== Generating Nomad config ==="
 
 if [[ "$ROLE" == "server" ]]; then
 
-cat >/etc/nomad.d/server.hcl <<EOF
+sudo tee /etc/nomad.d/server.hcl <<EOF > /dev/null
 server {
   enabled = true
   bootstrap_expect = 1
@@ -126,7 +166,7 @@ EOF
 
 else
 
-cat >/etc/nomad.d/client.hcl <<EOF
+sudo tee /etc/nomad.d/client.hcl <<EOF > /dev/null
 client {
   enabled = true
   servers = ["$SERVER_ADDR:4647"]
@@ -144,7 +184,7 @@ data_dir = "/opt/nomad"
 EOF
 
 if [ "$HAS_GPU" = true ]; then
-cat >/etc/nomad.d/gpu.hcl <<EOF
+sudo tee /etc/nomad.d/gpu.hcl <<EOF > /dev/null
 plugin "nvidia" {
   config {
     enabled = true
@@ -160,26 +200,26 @@ fi
 ### -----------------------------
 echo "=== Applying Linux tuning ==="
 
-cat >/etc/security/limits.d/99-nomad.conf <<EOF
+sudo tee /etc/security/limits.d/99-nomad.conf <<EOF > /dev/null
 * soft nofile 1048576
 * hard nofile 1048576
 EOF
 
-cat >/etc/sysctl.d/99-nomad.conf <<EOF
+sudo tee /etc/sysctl.d/99-nomad.conf <<EOF > /dev/null
 vm.swappiness=10
 net.core.somaxconn=4096
 net.ipv4.tcp_fin_timeout=15
 net.ipv4.tcp_tw_reuse=1
 EOF
 
-sysctl --system || true
+sudo sysctl --system || true
 
 ### -----------------------------
 ###  SYSTEMD SERVICE
 ### -----------------------------
 echo "=== Creating systemd service ==="
 
-cat >/etc/systemd/system/nomad.service <<EOF
+sudo tee /etc/systemd/system/nomad.service <<EOF > /dev/null
 [Unit]
 Description=Nomad Agent
 After=network.target docker.service
@@ -192,8 +232,8 @@ Restart=always
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable --now nomad
+sudo systemctl daemon-reload
+sudo systemctl enable --now nomad
 
 echo "=== DONE ==="
 echo "Nomad $ROLE is now configured."
