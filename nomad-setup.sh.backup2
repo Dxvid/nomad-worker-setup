@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -e
 
 ### ============================================================
 ###  GLOBAL VARIABLES
@@ -213,7 +213,7 @@ install_dependencies() {
         fi
     done
     if [[ ${#pkgs[@]} -gt 0 ]]; then
-        sudo zypper -n install "${pkgs[@]}"
+        sudo zypper -n install "${pkgs[@]}" || true
     fi
 }
 
@@ -302,9 +302,7 @@ configure_selinux() {
             pkgs+=("$pkg")
         fi
     done
-    if [[ ${#pkgs[@]} -gt 0 ]]; then
-        sudo zypper -n install "${pkgs[@]}" || true
-    fi
+    [[ ${#pkgs[@]} -gt 0 ]] && sudo zypper -n install "${pkgs[@]}" || true
 
     # File context for binary
     sudo semanage fcontext -a -t bin_t '/usr/local/bin/nomad' 2>/dev/null || \
